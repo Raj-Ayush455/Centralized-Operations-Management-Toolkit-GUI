@@ -1,23 +1,7 @@
-#!/usr/bin/env python3
-"""
-app.py — Main entry point for the Unified Operations Toolkit.
-
-A production-ready Streamlit dashboard for executing remote Kubernetes
-diagnostic commands across multiple target cluster servers via SSH.
-
-SECURITY MODEL: Zero-retention, in-memory-only credential handling.
-All server IPs, usernames, and passwords exist solely in volatile
-st.session_state dictionaries and are never written to disk.
-
-Launch:
-    streamlit run app.py
-"""
-
 import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-# ── Project Modules ─────────────────────────────────────────────────────
 from config import (
     APP_TITLE,
     APP_ICON,
@@ -51,10 +35,6 @@ from ui_components import (
     render_footer,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  PAGE CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════
-
 st.set_page_config(
     page_title=APP_TITLE,
     page_icon=APP_ICON,
@@ -65,17 +45,9 @@ st.set_page_config(
     },
 )
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  INITIALIZATION
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Inject premium dark-theme CSS
 inject_custom_css()
-
-# Initialize session state for the expandable server list
 init_server_list()
 
-# Initialize results storage in session state
 if "results_df" not in st.session_state:
     st.session_state.results_df = None
 if "execution_log" not in st.session_state:
@@ -84,33 +56,7 @@ if "last_run_time" not in st.session_state:
     st.session_state.last_run_time = None
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  ORCHESTRATION ENGINE
-# ═══════════════════════════════════════════════════════════════════════════
-
 def run_diagnostics(servers: list, selected_commands: dict):
-    """
-    Core orchestration pipeline.
-
-    Loops sequentially through the user-defined array of target servers,
-    establishes independent SSH channels, executes selected diagnostic
-    commands, parses output, and aggregates results.
-
-    Parameters
-    ----------
-    servers : list[dict]
-        Each dict contains 'host', 'username', 'password' keys.
-    selected_commands : dict
-        Output from render_command_sidebar() — only 'enabled' entries
-        are executed.
-
-    Returns
-    -------
-    pd.DataFrame
-        Unified aggregated results across all servers and commands.
-    list
-        Execution log entries for the UI.
-    """
     all_frames = []
     execution_log = []
     active_checks = {k: v for k, v in selected_commands.items() if v["enabled"]}
@@ -131,7 +77,6 @@ def run_diagnostics(servers: list, selected_commands: dict):
             completed += len(active_checks)
             continue
 
-        # ── Establish SSH Connection ────────────────────────────────
         ssh_client = None
         try:
             with status_container:
@@ -158,7 +103,6 @@ def run_diagnostics(servers: list, selected_commands: dict):
             with status_container:
                 render_log_entry(msg, "error")
 
-            # Skip all commands for this server, move to next
             completed += len(active_checks)
             progress_bar.progress(
                 min(completed / total_ops, 1.0),
@@ -166,7 +110,6 @@ def run_diagnostics(servers: list, selected_commands: dict):
             )
             continue
 
-        # ── Execute Selected Commands ───────────────────────────────
         try:
             for cmd_key, cmd_info in active_checks.items():
                 cmd_def = cmd_info["definition"]
@@ -178,7 +121,16 @@ def run_diagnostics(servers: list, selected_commands: dict):
                     text=f"[{host}] Running: {cmd_def['label']}",
                 )
 
-                # Build the command string with parameter substitution
+                namespace = st.session_state.get("namespace", "").strip()
+                if namespace:
+                    params["namespace"] = namespace
+                elif "{namespace}" in cmd_def["cmd"]:
+                    msg = f"⚠️ {host} / {cmd_def['label']}: Namespace required but not provided — skipped."
+                    execution_log.append(("warning", msg))
+                    with status_container:
+                        render_log_entry(msg, "warning")
+                    continue
+
                 try:
                     command_str = cmd_def["cmd"].format(**params)
                 except KeyError as ke:
@@ -186,7 +138,6 @@ def run_diagnostics(servers: list, selected_commands: dict):
                     execution_log.append(("warning", msg))
                     continue
 
-                # Execute the remote command
                 try:
                     stdout_text, stderr_text = execute_remote_command(
                         ssh_client, command_str, host,
@@ -196,7 +147,6 @@ def run_diagnostics(servers: list, selected_commands: dict):
                         msg = f"⚠️ {host} / {cmd_def['label']}: stderr → {stderr_text[:120]}"
                         execution_log.append(("warning", msg))
 
-                    # ── Parse Output Based on Command Type ──────────
                     if cmd_key == "dlb_peers":
                         df = parse_dlb_peerlist(
                             stdout_text,
@@ -236,11 +186,9 @@ def run_diagnostics(servers: list, selected_commands: dict):
                     execution_log.append(("error", msg))
                     with status_container:
                         render_log_entry(msg, "error")
-                    # Continue to next command — fault isolation
                     continue
 
         finally:
-            # ── Always tear down the SSH connection ──────────────────
             close_ssh_client(ssh_client)
             execution_log.append((
                 "info",
@@ -251,33 +199,22 @@ def run_diagnostics(servers: list, selected_commands: dict):
     return aggregate_dataframes(all_frames), execution_log
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  MAIN APPLICATION LAYOUT
-# ═══════════════════════════════════════════════════════════════════════════
-
 def main():
-    """Compose the full application UI and wire up the orchestration."""
-
-    # ── Header ──────────────────────────────────────────────────────
     render_header()
     render_security_notice()
 
-    # ── Sidebar: Command Selector ───────────────────────────────────
     selected_commands = render_command_sidebar()
 
-    # ── Main Content: Server Matrix ─────────────────────────────────
     render_server_matrix()
 
     st.markdown("---")
 
-    # ── Validation & Run Button ─────────────────────────────────────
     active_cmds = [v for v in selected_commands.values() if v["enabled"]]
     valid_servers = [
         s for s in st.session_state.servers
         if s.get("host", "").strip() and s.get("username", "").strip() and s.get("password", "")
     ]
 
-    # Pre-flight status
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown(
@@ -307,8 +244,19 @@ def main():
 
     st.markdown("")
 
-    # ── Run Diagnostics Button ──────────────────────────────────────
     can_run = bool(valid_servers) and bool(active_cmds)
+
+    namespace = st.session_state.get("namespace", "").strip()
+    namespaced_cmds_selected = any(
+        "{namespace}" in v["definition"]["cmd"]
+        for v in active_cmds
+    )
+    if not namespace and namespaced_cmds_selected:
+        st.warning(
+            "⚠️ **Namespace not set.** Some selected checks (StatefulSet, Certificate, PVC, Pods, DLB) "
+            "require a Kubernetes namespace. Enter it in the sidebar before running.",
+            icon="🏷️",
+        )
 
     if st.button(
         "🚀  Run Diagnostics",
@@ -320,21 +268,15 @@ def main():
             st.error("Please configure at least one server and select at least one diagnostic check.")
             return
 
-        # Execute the orchestration pipeline
         with st.spinner(""):
             results_df, execution_log = run_diagnostics(
                 st.session_state.servers,
                 selected_commands,
             )
 
-        # Persist results in session state
         st.session_state.results_df = results_df
         st.session_state.execution_log = execution_log
         st.session_state.last_run_time = datetime.now().strftime("%H:%M:%S")
-
-    # ═══════════════════════════════════════════════════════════════════
-    #  RESULTS DISPLAY
-    # ═══════════════════════════════════════════════════════════════════
 
     if st.session_state.results_df is not None:
         df = st.session_state.results_df
@@ -346,7 +288,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Summary Metrics ─────────────────────────────────────────
         successes = sum(1 for level, _ in log if level == "success")
         errors = sum(1 for level, _ in log if level == "error")
         warnings = sum(1 for level, _ in log if level == "warning")
@@ -361,14 +302,11 @@ def main():
 
         st.markdown("")
 
-        # ── Execution Log (Collapsible) ─────────────────────────────
         with st.expander("📝 Execution Log", expanded=False):
             for level, message in log:
                 render_log_entry(message, level)
 
-        # ── Data Grid Display ───────────────────────────────────────
         if not df.empty:
-            # Group by CHECK_TYPE for organized display
             if "CHECK_TYPE" in df.columns:
                 check_types = df["CHECK_TYPE"].unique()
 
@@ -376,7 +314,6 @@ def main():
                     ["📊 All Results"] + [f"🔍 {ct}" for ct in check_types]
                 )
 
-                # Tab 0: Combined view
                 with tabs[0]:
                     st.dataframe(
                         df,
@@ -384,7 +321,6 @@ def main():
                         height=min(400, 40 + len(df) * 35),
                     )
 
-                # Per-check tabs
                 for i, check_type in enumerate(check_types):
                     with tabs[i + 1]:
                         filtered = df[df["CHECK_TYPE"] == check_type].reset_index(drop=True)
@@ -396,7 +332,6 @@ def main():
             else:
                 st.dataframe(df, use_container_width=True)
 
-            # ── CSV Download Button ─────────────────────────────────
             st.markdown("")
             csv_bytes = dataframe_to_csv_bytes(df)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -419,13 +354,8 @@ def main():
                 icon="ℹ️",
             )
 
-    # ── Footer ──────────────────────────────────────────────────────
     render_footer()
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     main()
