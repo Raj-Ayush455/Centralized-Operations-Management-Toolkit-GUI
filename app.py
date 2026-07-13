@@ -54,6 +54,8 @@ if "execution_log" not in st.session_state:
     st.session_state.execution_log = []
 if "last_run_time" not in st.session_state:
     st.session_state.last_run_time = None
+if "custom_cmd_results" not in st.session_state:
+    st.session_state.custom_cmd_results = None
 
 
 def run_diagnostics(servers: list, selected_commands: dict):
@@ -199,7 +201,89 @@ def run_diagnostics(servers: list, selected_commands: dict):
     return aggregate_dataframes(all_frames), execution_log
 
 
+def run_custom_command(servers: list, command: str):
+    """Execute a single command on every server and return per-host results."""
+    results = []
+    total = len(servers)
+    progress_bar = st.progress(0, text="Initializing custom command pipeline...")
+    status_container = st.container()
+
+    for idx, server in enumerate(servers):
+        host = server["host"].strip()
+        username = server["username"].strip()
+        password = server["password"]
+
+        if not host or not username or not password:
+            results.append({
+                "host": host or f"Server #{idx + 1}",
+                "status": "skipped",
+                "stdout": "",
+                "stderr": "Incomplete credentials — skipped.",
+            })
+            progress_bar.progress(
+                min((idx + 1) / total, 1.0),
+                text=f"Skipped {host or f'Server #{idx + 1}'} — incomplete credentials",
+            )
+            continue
+
+        ssh_client = None
+        try:
+            progress_bar.progress(
+                min((idx + 0.5) / total, 1.0),
+                text=f"Connecting to {host}...",
+            )
+            with status_container:
+                render_log_entry(f"🔗 Connecting to <b>{host}</b> ...", "info")
+
+            ssh_client = create_ssh_client(
+                hostname=host,
+                username=username,
+                password=password,
+            )
+
+            progress_bar.progress(
+                min((idx + 0.7) / total, 1.0),
+                text=f"[{host}] Running: {command[:50]}...",
+            )
+
+            stdout_text, stderr_text = execute_remote_command(
+                ssh_client, command, host,
+            )
+
+            results.append({
+                "host": host,
+                "status": "success",
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+            })
+
+            with status_container:
+                render_log_entry(f"✅ {host} — command executed.", "success")
+
+        except SSHConnectionError as e:
+            results.append({
+                "host": host,
+                "status": "error",
+                "stdout": "",
+                "stderr": f"{e.error_type}: {e.message}",
+            })
+            with status_container:
+                render_log_entry(f"❌ {host} — {e.error_type}: {e.message}", "error")
+
+        finally:
+            close_ssh_client(ssh_client)
+
+        progress_bar.progress(
+            min((idx + 1) / total, 1.0),
+            text=f"Completed {idx + 1}/{total} servers",
+        )
+
+    progress_bar.progress(1.0, text="✅ Custom command execution complete.")
+    return results
+
+
 def main():
+
     render_header()
     render_security_notice()
 
@@ -353,6 +437,88 @@ def main():
                 "for connection errors or empty command outputs.",
                 icon="ℹ️",
             )
+
+    # ── Custom Command Execution Section ──────────────────────────────
+    st.markdown("---")
+    st.markdown("""
+    <div class="results-header">
+        <h3>⚡ Custom Command Execution</h3>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(
+        '<p style="color: #94a3b8; font-size: 0.9rem; margin-bottom: 1rem;">'
+        'Enter any command below and execute it across <b>all configured servers</b> simultaneously. '
+        'Results are displayed per-node.</p>',
+        unsafe_allow_html=True,
+    )
+
+    custom_cmd = st.text_input(
+        "🔧 Command",
+        key="custom_command_input",
+        placeholder="e.g., kubectl get nodes, uptime, df -h, free -m",
+        help="This command will be executed on every server in the Target Server Matrix above.",
+    )
+
+    can_run_custom = bool(valid_servers) and bool(custom_cmd and custom_cmd.strip())
+
+    if st.button(
+        "⚡  Execute on All Nodes",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_run_custom,
+        key="run_custom_cmd_btn",
+    ):
+        with st.spinner(""):
+            st.session_state.custom_cmd_results = run_custom_command(
+                st.session_state.servers,
+                custom_cmd.strip(),
+            )
+
+    if st.session_state.custom_cmd_results is not None:
+        results = st.session_state.custom_cmd_results
+
+        successes = sum(1 for r in results if r["status"] == "success")
+        errors = sum(1 for r in results if r["status"] == "error")
+        skipped = sum(1 for r in results if r["status"] == "skipped")
+
+        render_metric_cards({
+            "Nodes": (str(len(results)), "🖥️"),
+            "Successful": (str(successes), "✅"),
+            "Failed": (str(errors), "❌"),
+            "Skipped": (str(skipped), "⏭️"),
+        })
+
+        st.markdown("")
+
+        for r in results:
+            host_label = r["host"]
+            if r["status"] == "success":
+                icon = "✅"
+            elif r["status"] == "error":
+                icon = "❌"
+            else:
+                icon = "⏭️"
+
+            with st.expander(f"{icon}  {host_label}", expanded=(r["status"] == "success")):
+                if r["stdout"]:
+                    st.markdown(
+                        f'<span style="color: #10b981; font-size: 0.8rem; font-weight: 600; '
+                        f'text-transform: uppercase; letter-spacing: 0.5px;">Standard Output</span>',
+                        unsafe_allow_html=True,
+                    )
+                    st.code(r["stdout"], language="text")
+
+                if r["stderr"]:
+                    st.markdown(
+                        f'<span style="color: #f59e0b; font-size: 0.8rem; font-weight: 600; '
+                        f'text-transform: uppercase; letter-spacing: 0.5px;">Standard Error</span>',
+                        unsafe_allow_html=True,
+                    )
+                    st.code(r["stderr"], language="text")
+
+                if not r["stdout"] and not r["stderr"]:
+                    st.info("No output returned.", icon="ℹ️")
 
     render_footer()
 
