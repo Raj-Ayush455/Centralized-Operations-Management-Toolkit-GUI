@@ -88,6 +88,8 @@ def inject_custom_css():
             border-radius: 20px;
             margin: 0.15rem 0.25rem;
         }}
+
+     
         .status-success {{
             background: rgba(16, 185, 129, 0.12);
             color: {THEME['success']};
@@ -220,7 +222,7 @@ def inject_custom_css():
 def render_header():
     st.markdown("""
     <div class="app-header">
-        <h1>🛡️ Unified Operations Toolkit</h1>
+        <h1>🛡️ Automation in Intelligent Network System</h1>
         <p>Enterprise Kubernetes Diagnostics Dashboard — Secure Multi-Cluster Remote Execution</p>
     </div>
     """, unsafe_allow_html=True)
@@ -425,10 +427,12 @@ def render_metric_cards(metrics: dict):
             """, unsafe_allow_html=True)
 
 
+
+
 def render_footer():
     st.markdown("""
     <div class="app-footer">
-        Unified Operations Toolkit • Local Storage Persistence •
+        Automation in Intelligent Network System • Local Storage Persistence •
         Enterprise Kubernetes Diagnostics
     </div>
     """, unsafe_allow_html=True)

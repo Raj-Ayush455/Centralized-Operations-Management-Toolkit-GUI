@@ -134,3 +134,136 @@ def aggregate_dataframes(frames: List[pd.DataFrame]) -> pd.DataFrame:
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
     csv_string = df.to_csv(index=False)
     return ("\ufeff" + csv_string).encode("utf-8")
+
+
+# ── Data-Level Health Classification ──────────────────────────────────
+
+# Thresholds
+CPU_WARN_THRESHOLD = 85       # percentage
+MEMORY_WARN_THRESHOLD = 85    # percentage
+RESTART_WARN_THRESHOLD = 5    # pod restart count
+
+def _parse_percentage(value: str) -> Optional[float]:
+    """Extract a numeric percentage from strings like '45%', '85%', '92m'."""
+    if not value or not isinstance(value, str):
+        return None
+    cleaned = value.strip().rstrip("%")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _check_ready_fraction(value: str) -> str:
+    """Check READY columns like '3/3', '0/3', '2/3'. Returns health status."""
+    if not value or not isinstance(value, str):
+        return "healthy"
+    parts = value.strip().split("/")
+    if len(parts) == 2:
+        try:
+            current, desired = int(parts[0]), int(parts[1])
+            if desired == 0:
+                return "warning"
+            if current == desired:
+                return "healthy"
+            if current == 0:
+                return "critical"
+            return "warning"
+        except ValueError:
+            pass
+    return "healthy"
+
+
+def classify_row_health(row: pd.Series) -> str:
+    """
+    Classify a single data row as 'healthy', 'warning', or 'critical'
+    based on the actual diagnostic values.
+    """
+    check_type = str(row.get("CHECK_TYPE", "")).lower()
+
+    # ── Worker Nodes: STATUS must be 'Ready' ──
+    if check_type == "worker_nodes":
+        status = str(row.get("STATUS", "")).strip()
+        if status.lower() != "ready":
+            return "critical"
+        return "healthy"
+
+    # ── CPU Audit: CPU_% and MEMORY_% thresholds ──
+    if check_type == "cpu_audit":
+        cpu_pct = _parse_percentage(str(row.get("CPU_%", "")))
+        mem_pct = _parse_percentage(str(row.get("MEMORY_%", "")))
+        if cpu_pct is not None and cpu_pct >= CPU_WARN_THRESHOLD:
+            return "warning" if cpu_pct < 95 else "critical"
+        if mem_pct is not None and mem_pct >= MEMORY_WARN_THRESHOLD:
+            return "warning" if mem_pct < 95 else "critical"
+        return "healthy"
+
+    # ── StatefulSet: READY column (e.g. '3/3' vs '2/3') ──
+    if check_type == "statefulset":
+        return _check_ready_fraction(str(row.get("READY", "")))
+
+    # ── Certificates: READY must be 'True' ──
+    if check_type == "certificates":
+        ready = str(row.get("READY", "")).strip().lower()
+        if ready == "true":
+            return "healthy"
+        return "warning"
+
+    # ── PVC: STATUS must be 'Bound' ──
+    if check_type == "pvc":
+        status = str(row.get("STATUS", "")).strip().lower()
+        if status == "bound":
+            return "healthy"
+        if status == "pending":
+            return "warning"
+        return "critical"
+
+    # ── Pods: STATUS and RESTARTS ──
+    if check_type == "pods":
+        status = str(row.get("STATUS", "")).strip().lower()
+        restarts = 0
+        try:
+            restarts = int(str(row.get("RESTARTS", "0")).strip())
+        except ValueError:
+            pass
+
+        if status in ("running", "completed", "succeeded"):
+            if restarts >= RESTART_WARN_THRESHOLD:
+                return "warning"
+            return "healthy"
+        if status in ("pending", "init:0/1", "containercreating", "podinitialing"):
+            return "warning"
+        # CrashLoopBackOff, Error, ImagePullBackOff, etc.
+        return "critical"
+
+    # ── DLB Peers: STATUS should be 'OPEN' ──
+    if check_type == "dlb_peers":
+        status = str(row.get("STATUS", "")).strip().upper()
+        if status == "OPEN":
+            return "healthy"
+        return "warning"
+
+    # ── Ping Test: RESULT must be 'REACHABLE' ──
+    if check_type == "ping_test":
+        result = str(row.get("RESULT", "")).strip().upper()
+        if result == "REACHABLE":
+            return "healthy"
+        return "critical"
+
+    # ── Services: generally informational, always healthy ──
+    if check_type == "services":
+        return "healthy"
+
+    return "healthy"
+
+
+def classify_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add a HEALTH_STATUS column to the DataFrame by classifying each row
+    based on actual diagnostic data values.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    df["HEALTH_STATUS"] = df.apply(classify_row_health, axis=1)
+    return df

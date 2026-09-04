@@ -1,4 +1,4 @@
-APP_TITLE = "Unified Operations Toolkit"
+APP_TITLE = "Automation in Intelligent Network System"
 APP_ICON = "🛡️"
 APP_SUBTITLE = "Enterprise Kubernetes Diagnostics Dashboard"
 
@@ -13,6 +13,13 @@ DIAGNOSTIC_COMMANDS = [
         "key": "worker_nodes",
         "requires": [],
         "columns": ["NAME", "STATUS", "ROLES", "AGE", "VERSION"],
+    },
+   {
+      "label": "Service Status Check",
+      "cmd": "kubectl get svc -n {namespace} --no-headers",
+      "key": "services",
+      "requires": [],
+      "columns": ["NAME", "TYPE", "CLUSTER_IP", "EXTERNAL_IP", "PORTS", "AGE"],
     },
     {
         "label": "CPU Capacity Audit",
